@@ -1,0 +1,9 @@
+# Moss runtime dependencies
+rank_bm25>=0.2.2
+
+# Optional — for cross-encoder reranking
+# sentence-transformers>=2.2.0
+
+# Dev / testing
+pytest>=7.0
+pytest-cov>=4.0
