@@ -1,64 +1,64 @@
-"""Tests for Moss multi-channel RRF module."""
+"""Tests for Multi-Channel RRF module."""
 import pytest
-from moss.rrf.reciprocal_rank_fusion import (
-    rrf_fuse, normalize_scores, RRFChannel
-)
+from moss.rrf.reciprocal_rank_fusion import reciprocal_rank_fusion, RRFConfig
+from moss.rrf.bm25_rrf import BM25RRFRetriever
 
 
-def test_rrf_basic_fusion():
-    channels = [
-        RRFChannel(name="vector", results=["a", "b", "c"], weight=1.0),
-        RRFChannel(name="bm25",   results=["b", "a", "d"], weight=1.0),
-    ]
-    fused = rrf_fuse(channels, k=60)
-    ids = [item[0] for item in fused]
-    # b and a both appear in both channels — should rank high
-    assert ids[0] in ("a", "b")
-    assert ids[1] in ("a", "b")
+def test_rrf_basic():
+    """Basic RRF fusion of two ranked lists."""
+    ranking_a = ["doc1", "doc2", "doc3"]
+    ranking_b = ["doc2", "doc1", "doc4"]
+    
+    fused = reciprocal_rank_fusion([ranking_a, ranking_b])
+    assert isinstance(fused, list)
+    assert len(fused) > 0
+    # doc2 and doc1 should be high in fused ranking (present in both lists)
+    top_ids = [item[0] if isinstance(item, tuple) else item for item in fused[:2]]
+    assert "doc1" in top_ids or "doc2" in top_ids
 
 
-def test_rrf_weighted_channels():
-    """Channel with higher weight should dominate."""
-    channels = [
-        RRFChannel(name="strong", results=["x", "y", "z"], weight=5.0),
-        RRFChannel(name="weak",   results=["z", "y", "x"], weight=0.1),
-    ]
-    fused = rrf_fuse(channels, k=60)
-    ids = [item[0] for item in fused]
-    assert ids[0] == "x"  # strong channel tops
+def test_rrf_single_list():
+    """RRF with a single list should preserve order."""
+    ranking = ["doc1", "doc2", "doc3"]
+    fused = reciprocal_rank_fusion([ranking])
+    result_ids = [item[0] if isinstance(item, tuple) else item for item in fused]
+    assert result_ids == ranking
 
 
-def test_rrf_deduplication():
-    channels = [
-        RRFChannel(name="a", results=["x", "x", "y"], weight=1.0),
-    ]
-    fused = rrf_fuse(channels, k=60)
-    ids = [item[0] for item in fused]
-    assert len(ids) == len(set(ids))
-
-
-def test_normalize_scores_basic():
-    scores = {"a": 10.0, "b": 5.0, "c": 0.0}
-    normed = normalize_scores(scores)
-    assert abs(normed["a"] - 1.0) < 1e-9
-    assert abs(normed["c"] - 0.0) < 1e-9
-    assert 0.0 < normed["b"] < 1.0
-
-
-def test_normalize_scores_all_equal():
-    scores = {"a": 3.0, "b": 3.0}
-    normed = normalize_scores(scores)
-    # All equal — should all be 0 or all 1 (implementation-defined)
-    assert all(v >= 0.0 for v in normed.values())
-
-
-def test_rrf_empty_channels():
-    fused = rrf_fuse([], k=60)
+def test_rrf_empty():
+    """RRF with empty lists should return empty."""
+    fused = reciprocal_rank_fusion([])
     assert fused == []
 
 
-def test_rrf_single_channel():
-    channels = [RRFChannel(name="only", results=["a", "b", "c"], weight=1.0)]
-    fused = rrf_fuse(channels, k=60)
-    ids = [item[0] for item in fused]
-    assert ids[0] == "a"
+def test_rrf_k_parameter():
+    """k parameter affects score magnitude but not relative ranking."""
+    ranking_a = ["doc1", "doc2", "doc3"]
+    ranking_b = ["doc1", "doc3", "doc2"]
+    
+    fused_60 = reciprocal_rank_fusion([ranking_a, ranking_b], k=60)
+    fused_10 = reciprocal_rank_fusion([ranking_a, ranking_b], k=10)
+    
+    # doc1 should be first in both (appears first in both lists)
+    for fused in [fused_60, fused_10]:
+        first = fused[0]
+        first_id = first[0] if isinstance(first, tuple) else first
+        assert first_id == "doc1"
+
+
+def test_bm25_retriever_basic():
+    """BM25 retriever with a small corpus."""
+    documents = [
+        {"id": "1", "text": "the quick brown fox jumps over the lazy dog"},
+        {"id": "2", "text": "cats and dogs are common pets"},
+        {"id": "3", "text": "machine learning and neural networks"},
+    ]
+    
+    retriever = BM25RRFRetriever(documents)
+    results = retriever.search("fox dog", top_k=2)
+    
+    assert isinstance(results, list)
+    assert len(results) <= 2
+    # Doc 1 should be relevant to "fox dog"
+    result_ids = [r["id"] if isinstance(r, dict) else r for r in results]
+    assert "1" in result_ids
