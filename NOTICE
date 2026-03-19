@@ -1,14 +1,26 @@
-Moss — Neuroplastic Memory Retrieval
+NOTICE
+
+Moss
 Copyright 2026 Lichen Research Inc.
 
-This product is protected by pending patent applications filed March 17, 2026
-with the Canadian Intellectual Property Office (CIPO):
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
 
-- Application 1: Hebbian Memory Recall with Spreading Activation
-- Application 2: Temporal Reasoning via Multi-stage Code Execution (TReMu)  
-- Application 3: Multi-Channel Reciprocal Rank Fusion for Memory Retrieval
+    http://www.apache.org/licenses/LICENSE-2.0
 
-US provisional patent applications filed March 2026.
+PATENT NOTICE
 
-This software is licensed under the Apache License, Version 2.0.
-See the LICENSE file for details.
+One or more of the techniques implemented in this software are the subject of
+pending patent applications:
+
+  - Hebbian Recall with Spreading Activation (Canadian Patent Application, 2026)
+  - Temporal Reasoning via Multi-stage Code Execution (TReMu) (Canadian Patent Application, 2026)
+  - Multi-Channel Reciprocal Rank Fusion with Intent-Guided Weighting (Canadian Patent Application, 2026)
+
+These patent applications are filed with the Canadian Intellectual Property Office (CIPO).
+US provisional patent applications are pending.
+
+Use of this software for research, education, and non-commercial purposes is permitted
+under the Apache 2.0 License. For commercial licensing inquiries, contact:
+  hello@lichenresearch.ai
