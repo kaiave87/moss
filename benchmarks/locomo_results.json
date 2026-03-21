@@ -1,14 +1,84 @@
 {
   "benchmark": "LoCoMo",
-  "version": "V12",
-  "score": 0.766,
-  "questions": 1986,
-  "date": "2026-03-08",
-  "categories": {
-    "adversarial": 0.95,
-    "multi-hop": 0.743,
-    "single-hop": 0.596,
-    "temporal": 0.676,
-    "common-sense": 0.885
+  "dataset": "10-conversation (1,986 questions)",
+  "judge": "GPT-4o",
+  "source": "https://github.com/snap-research/locomo",
+  "runs": [
+    {
+      "version": "V12",
+      "date": "2026-03-08",
+      "model": "Qwen3-30B-A3B",
+      "config": {
+        "recall_limit": 25,
+        "hybrid": true,
+        "session_context": true,
+        "spreading_activation": true,
+        "graph_expand": false,
+        "multi_hop": false
+      },
+      "overall": 0.766,
+      "overall_excl_adversarial": 0.694,
+      "categories": {
+        "single-hop": 0.596,
+        "multi-hop": 0.743,
+        "temporal": 0.676,
+        "adversarial": 0.950,
+        "common-sense": 0.885
+      }
+    },
+    {
+      "version": "V25a",
+      "date": "2026-03-21",
+      "model": "Qwen3-30B-A3B",
+      "config": {
+        "recall_limit": 10,
+        "hybrid": false,
+        "session_context": false,
+        "spreading_activation": true,
+        "graph_expand": false,
+        "multi_hop": false
+      },
+      "overall": 0.553,
+      "overall_excl_adversarial": 0.433,
+      "categories": {
+        "single-hop": 0.447,
+        "multi-hop": 0.517,
+        "temporal": 0.231,
+        "adversarial": 0.966,
+        "common-sense": 0.328
+      },
+      "notes": "Reduced recall_limit (10 vs 25) and disabled hybrid/session-context explain part of V12→V25a regression."
+    },
+    {
+      "version": "V25b",
+      "date": "2026-03-21",
+      "model": "GPT-5.4 mini",
+      "config": {
+        "recall_limit": 10,
+        "hybrid": false,
+        "session_context": false,
+        "spreading_activation": true,
+        "graph_expand": false,
+        "multi_hop": false
+      },
+      "overall": 0.613,
+      "overall_excl_adversarial": 0.502,
+      "categories": {
+        "single-hop": 0.450,
+        "multi-hop": 0.496,
+        "temporal": 0.520,
+        "adversarial": 0.998,
+        "common-sense": 0.646
+      },
+      "notes": "Same retrieval pipeline as V25a, different answering model. Delta isolates LLM vs retrieval contribution."
+    }
+  ],
+  "analysis": {
+    "v25_dual_model_findings": {
+      "description": "V25a and V25b share identical retrieval but different answering models, isolating the bottleneck per category.",
+      "retrieval_bound": ["single-hop (+0.4pp)", "multi-hop (-2.1pp)"],
+      "llm_bound": ["temporal (+29.0pp)", "common-sense (+31.8pp)"],
+      "conclusion": "Single-hop and multi-hop scores are retrieval-limited. Temporal and common-sense are LLM-limited."
+    }
   }
 }

@@ -133,18 +133,42 @@ for r in fused:
 
 ## Benchmark Results
 
-Evaluated on the LoCoMo long-term conversation memory benchmark (1,986 questions):
+Evaluated on the [LoCoMo](https://github.com/snap-research/locomo) long-term conversation memory benchmark (10 conversations, 1,986 questions, GPT-4o judge).
+
+We report both **with** and **without** adversarial categories. Most published systems exclude adversarial (Category 5) following the LoCoMo evaluation protocol. We include it because hallucination resistance is a core feature of neuroplastic memory.
+
+### V12 (best overall)
 
 | Category | Score |
 |----------|-------|
 | **Overall** | **76.6%** |
-| Adversarial | 95.0% |
-| Common-sense | 88.5% |
+| **Overall (excl. adversarial)** | **69.4%** |
+| Single-hop | 59.6% |
 | Multi-hop | 74.3% |
 | Temporal | 67.6% |
-| Single-hop | 59.6% |
+| Adversarial | 95.0% |
+| Common-sense | 88.5% |
 
-Benchmark details: `benchmarks/locomo_results.json`
+Config: Qwen3-30B-A3B, recall_limit=25, hybrid retrieval, session context, spreading activation.
+
+### V25 — Dual-Model Ablation
+
+V25 runs identical retrieval with two different answering models to isolate the bottleneck per category.
+
+| Category | V25a (Qwen3-30B-A3B) | V25b (GPT-5.4 mini) | Delta | Bottleneck |
+|---|---|---|---|---|
+| Single-hop | 44.7% | 45.0% | +0.4pp | Retrieval |
+| Multi-hop | 51.7% | 49.6% | -2.1pp | Retrieval |
+| Temporal | 23.1% | 52.0% | +29.0pp | LLM |
+| Adversarial | 96.6% | 99.8% | +3.1pp | — |
+| Common-sense | 32.8% | 64.6% | +31.8pp | LLM |
+| **Overall** | **55.3%** | **61.3%** | **+6.1pp** | |
+
+Config: recall_limit=10, no hybrid, no session context. The V12→V25 regression is partly configuration (reduced recall_limit, disabled hybrid/session-context), not just model quality.
+
+**Finding:** Single-hop and multi-hop are retrieval-bound (same score regardless of model). Temporal and common-sense are LLM-bound (+29pp/+32pp with stronger model).
+
+Full results: `benchmarks/locomo_results.json`
 
 ---
 
