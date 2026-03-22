@@ -1,5 +1,5 @@
 """
-TReMu-style temporal reasoning module 
+TReMu-style temporal reasoning module for Moss memory retrieval pipeline.
 
 Neuro-symbolic approach: detect temporal questions, extract structured timelines
 via LLM, generate Python code to compute the answer, execute in sandbox.
@@ -39,7 +39,6 @@ _TEMPORAL_KEYWORDS = [
     "before or after", "which came first", "first or",
     "most recent", "earliest", "latest",
     "how long between", "time between", "duration",
-    "timeline", "chronological", "in order",
 ]
 
 # Weaker signals -- need at least two, or one plus a date-like pattern

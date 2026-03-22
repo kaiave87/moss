@@ -38,13 +38,18 @@ CREATE TABLE IF NOT EXISTS unified_memory (
     memory_type TEXT DEFAULT 'episodic',   -- episodic, semantic, procedural
     content_type TEXT DEFAULT 'general',
     strength    REAL DEFAULT 0.5,          -- Hebbian strength [0, 1]
+    importance_score REAL DEFAULT 0.5,     -- Importance weight [0, 1]
     access_count INTEGER DEFAULT 0,
     last_accessed TEXT,                    -- ISO timestamp
     created_at  TEXT,
     content_hash TEXT,                     -- MD5 for integrity verification
     embedding   TEXT,                      -- JSON-encoded float list
+    embedding_4096 TEXT,                   -- Full-resolution embedding (JSON)
     estimated_tokens INTEGER DEFAULT 0,
-    is_stale    INTEGER DEFAULT 0          -- boolean
+    is_stale    INTEGER DEFAULT 0,         -- boolean
+    archived    INTEGER DEFAULT 0,         -- boolean
+    foresight_valid_from TEXT,             -- ISO timestamp (foresight window)
+    foresight_valid_until TEXT             -- ISO timestamp (foresight window)
 );
 
 -- memory_pathways: Hebbian co-activation graph
@@ -61,8 +66,31 @@ CREATE TABLE IF NOT EXISTS memory_pathways (
     pruned_at       TEXT,                  -- Soft-delete timestamp
     labile          INTEGER DEFAULT 0,     -- Reconsolidation lability flag
     labile_until    TEXT,                  -- Lability window expiry
+    labile_count_epoch INTEGER DEFAULT 0,  -- Cap labile edges per epoch
     pathway_type    TEXT DEFAULT 'coactivation',
+    outcome_weighted_strength REAL,        -- Outcome-feedback weight
+    correction_count INTEGER DEFAULT 0,
+    confirmation_count INTEGER DEFAULT 0,
     UNIQUE(source_memory, target_memory)
+);
+
+-- entity_memory_links: entity-to-memory association table
+-- Used for wisdom node retrieval and multi-hop entity bridging
+CREATE TABLE IF NOT EXISTS entity_memory_links (
+    id          TEXT PRIMARY KEY,
+    entity_id   TEXT NOT NULL,
+    memory_id   TEXT NOT NULL REFERENCES unified_memory(id),
+    confidence  REAL DEFAULT 1.0,
+    created_at  TEXT
+);
+
+-- access_log: per-access timestamps for ACT-R activation
+-- B_i = ln(sum(t_j^(-d))) where t_j = time since access j
+CREATE TABLE IF NOT EXISTS access_log (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    memory_id   TEXT NOT NULL,
+    accessed_at TEXT NOT NULL,
+    query_text  TEXT
 );
 """
 
@@ -333,7 +361,155 @@ class MockDB:
         ).fetchone()
         return row["n"]
 
-    # ── Helpers ──────────────────────────────────────────────────────────────
+    # ── Lability (Reconsolidation) ─────────────────────────────────────────
+
+    def mark_labile(
+        self,
+        memory_ids: List[str],
+        hours: int = 6,
+        cap: int = 50,
+    ) -> None:
+        """Mark pathways connected to these memories as labile.
+
+        Labile pathways are in a plasticity window — they can be more
+        easily strengthened or weakened (reconsolidation, Nader 2000).
+        """
+        if len(memory_ids) < 2:
+            return
+        from datetime import timedelta
+        labile_until = (datetime.now(timezone.utc) + timedelta(hours=hours)).isoformat()
+
+        placeholders = ",".join("?" * len(memory_ids))
+        self._conn.execute(
+            f"""
+            UPDATE memory_pathways
+            SET labile = 1,
+                labile_until = ?,
+                labile_count_epoch = COALESCE(labile_count_epoch, 0) + 1
+            WHERE (source_memory IN ({placeholders})
+                   OR target_memory IN ({placeholders}))
+              AND labile = 0
+              AND COALESCE(labile_count_epoch, 0) < ?
+            """,
+            (labile_until, *memory_ids, *memory_ids, cap),
+        )
+        self._conn.commit()
+
+    # ── Access Log (ACT-R) ──────────────────────────────────────────────────
+
+    def log_access(self, memory_id: str, query_text: Optional[str] = None) -> None:
+        """Log a memory access event for ACT-R activation tracking."""
+        self._conn.execute(
+            "INSERT INTO access_log (memory_id, accessed_at, query_text) VALUES (?, ?, ?)",
+            (memory_id, _now_iso(), query_text),
+        )
+        self._conn.commit()
+
+    def get_access_log(self, memory_ids: List[str]) -> Dict[str, List[float]]:
+        """Return hours-since-access for each memory (for ACT-R activation).
+
+        Returns:
+            {memory_id: [hours_since_access_1, hours_since_access_2, ...]}
+        """
+        if not memory_ids:
+            return {}
+        placeholders = ",".join("?" * len(memory_ids))
+        rows = self._conn.execute(
+            f"""
+            SELECT memory_id, accessed_at FROM access_log
+            WHERE memory_id IN ({placeholders})
+            ORDER BY accessed_at DESC
+            """,
+            tuple(memory_ids),
+        ).fetchall()
+
+        result: Dict[str, List[float]] = {}
+        now = datetime.now(timezone.utc)
+        for row in rows:
+            mid = row["memory_id"]
+            try:
+                accessed = datetime.fromisoformat(row["accessed_at"])
+                if accessed.tzinfo is None:
+                    accessed = accessed.replace(tzinfo=timezone.utc)
+                hours_since = max(0.001, (now - accessed).total_seconds() / 3600)
+            except Exception:
+                continue
+            result.setdefault(mid, []).append(hours_since)
+        return result
+
+    # ── Wisdom Nodes ────────────────────────────────────────────────────────
+
+    def get_linked_wisdom_nodes(
+        self,
+        seed_ids: List[str],
+        limit: int = 3,
+    ) -> List[Dict[str, Any]]:
+        """Find synthesis memories linked to seeds via shared entities.
+
+        Returns memories where memory_type='synthesis' that share
+        entity links with the given seed memories.
+        """
+        if not seed_ids:
+            return []
+        placeholders = ",".join("?" * len(seed_ids))
+        rows = self._conn.execute(
+            f"""
+            SELECT DISTINCT
+                um.id, um.content, um.summary, um.tier, um.created_at,
+                um.content_hash,
+                MAX(eml_seed.confidence * eml_wisdom.confidence) as link_score
+            FROM entity_memory_links eml_seed
+            JOIN entity_memory_links eml_wisdom
+                ON eml_wisdom.entity_id = eml_seed.entity_id
+            JOIN unified_memory um
+                ON um.id = eml_wisdom.memory_id
+            WHERE eml_seed.memory_id IN ({placeholders})
+              AND um.memory_type = 'synthesis'
+              AND um.archived = 0
+              AND um.id NOT IN ({placeholders})
+            GROUP BY um.id, um.content, um.summary, um.tier, um.created_at, um.content_hash
+            ORDER BY link_score DESC
+            LIMIT ?
+            """,
+            (*seed_ids, *seed_ids, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    # ── Foresight ───────────────────────────────────────────────────────────
+
+    def get_foresight_windows(
+        self, memory_ids: List[str]
+    ) -> List[Tuple[str, Optional[datetime], datetime]]:
+        """Return (id, valid_from, valid_until) for memories with foresight windows."""
+        if not memory_ids:
+            return []
+        placeholders = ",".join("?" * len(memory_ids))
+        rows = self._conn.execute(
+            f"""
+            SELECT id, foresight_valid_from, foresight_valid_until
+            FROM unified_memory
+            WHERE id IN ({placeholders})
+              AND foresight_valid_until IS NOT NULL
+            """,
+            tuple(memory_ids),
+        ).fetchall()
+
+        result = []
+        for row in rows:
+            valid_from = None
+            valid_until = None
+            try:
+                if row["foresight_valid_from"]:
+                    valid_from = datetime.fromisoformat(row["foresight_valid_from"])
+                if row["foresight_valid_until"]:
+                    valid_until = datetime.fromisoformat(row["foresight_valid_until"])
+            except Exception:
+                continue
+            if valid_until:
+                result.append((row["id"], valid_from, valid_until))
+        return result
+
+    # ── Helpers ─────────────────────────────────────────────────────────────
 
     def close(self) -> None:
         """Close the SQLite connection."""

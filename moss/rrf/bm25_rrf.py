@@ -1,15 +1,16 @@
 """
-BM25 + Reciprocal Rank Fusion — Hybrid Lexical/Semantic Retrieval
+BM25 + Reciprocal Rank Fusion for Moss benchmark pipeline.
 
-Drop-in hybrid retrieval module. Combines BM25 lexical search with vector
-similarity search via Reciprocal Rank Fusion (RRF) to improve recall on
-temporal queries, named entities, and exact-match facts where embedding
-similarity alone under-retrieves.
+Drop-in hybrid retrieval module. Combines BM25 lexical search with existing
+vector similarity search via Reciprocal Rank Fusion (RRF) to improve recall
+on LoCoMo benchmarks — especially for temporal queries, named entities, and
+exact-match facts where embedding similarity alone under-retrieves.
 
 Requirements:
     pip install rank_bm25
 
-Patent pending — Lichen Research Inc., Canadian application filed March 2026.
+Usage with locomo_adapter.py:
+    See INTEGRATION EXAMPLE at bottom of file.
 """
 
 from __future__ import annotations
@@ -59,7 +60,8 @@ class BM25Index:
         - "id": unique identifier
         - "content": text to index
 
-    Any additional keys (metadata, etc.) are preserved in search results.
+    Any additional keys (metadata, conversation_id, etc.) are preserved and
+    returned in search results.
     """
 
     def __init__(self):
@@ -73,6 +75,7 @@ class BM25Index:
 
         Args:
             docs: List of dicts, each with "id" and "content" keys.
+                  Extra keys are stored and returned on search.
         """
         for doc in docs:
             if "content" not in doc:
@@ -89,7 +92,8 @@ class BM25Index:
     def search(self, query: str, top_k: int = 50) -> List[Dict[str, Any]]:
         """Return top_k documents ranked by BM25 score.
 
-        Returns list of dicts with original fields plus "score" and "rank".
+        Returns list of dicts: original doc fields + "score" (BM25 score)
+        and "rank" (1-indexed position).
         """
         if self._dirty:
             self._rebuild()
@@ -101,13 +105,15 @@ class BM25Index:
             return []
 
         scores = self._bm25.get_scores(tokens)
+
+        # Pair scores with doc indices, sort descending
         scored = sorted(enumerate(scores), key=lambda x: x[1], reverse=True)
 
         results = []
         for rank, (idx, score) in enumerate(scored[:top_k], start=1):
             if score <= 0:
                 break
-            entry = dict(self._docs[idx])
+            entry = dict(self._docs[idx])  # copy
             entry["score"] = float(score)
             entry["rank"] = rank
             results.append(entry)
@@ -134,16 +140,17 @@ def reciprocal_rank_fusion(
     where rank_i is the 1-indexed position in list i (if present).
 
     Args:
-        result_lists: List of ranked result lists. Each result must contain
-                      id_key for deduplication and optionally "rank"
-                      (1-indexed). If "rank" is absent, list position is used.
-        k: RRF constant (default 60 per Cormack 2009). Higher k reduces
+        result_lists: List of ranked result lists. Each result is a dict
+                      that must contain `id_key` for dedup and optionally
+                      "rank" (1-indexed). If "rank" is missing, position
+                      in the list is used.
+        k: RRF constant (default 60 per original paper). Higher k reduces
            the influence of high-ranking items.
         id_key: Key used to identify unique documents across lists.
 
     Returns:
-        Fused list sorted by RRF score descending, with "rrf_score" and
-        "rrf_rank" added to each dict.
+        Fused list sorted by RRF score descending. Each dict has the original
+        fields plus "rrf_score" and "rrf_rank".
     """
     rrf_scores: Dict[Any, float] = {}
     doc_map: Dict[Any, Dict[str, Any]] = {}
@@ -155,9 +162,11 @@ def reciprocal_rank_fusion(
                 continue
             rank = doc.get("rank", position)
             rrf_scores[doc_id] = rrf_scores.get(doc_id, 0.0) + 1.0 / (k + rank)
+            # Keep the first (highest-quality) version of the doc metadata
             if doc_id not in doc_map:
                 doc_map[doc_id] = dict(doc)
 
+    # Sort by fused score
     sorted_ids = sorted(rrf_scores, key=lambda did: rrf_scores[did], reverse=True)
 
     fused = []
@@ -165,6 +174,7 @@ def reciprocal_rank_fusion(
         entry = doc_map[doc_id]
         entry["rrf_score"] = rrf_scores[doc_id]
         entry["rrf_rank"] = rrf_rank
+        # Remove per-source rank/score to avoid confusion
         entry.pop("rank", None)
         fused.append(entry)
 
@@ -186,18 +196,21 @@ def hybrid_search(
     """Combine vector search results with BM25 search via RRF.
 
     Args:
-        query: Search query string.
+        query: The search query string.
         vector_results: Pre-computed vector similarity results. Each dict
-                        must have "id" and "content" fields.
+                        must have "id", "content", "score". These come
+                        directly from _scoped_recall().
         bm25_index: A pre-built BM25Index over the same document corpus.
         top_k: Number of fused results to return.
-        bm25_top_k: BM25 candidates to retrieve before fusion.
+        bm25_top_k: How many BM25 candidates to retrieve before fusion.
         rrf_k: RRF constant.
 
     Returns:
         Top-k fused results sorted by RRF score. Each dict has "id",
-        "content", "rrf_score", "rrf_rank", and original metadata.
+        "content", "rrf_score", "rrf_rank", and any metadata from the
+        original documents.
     """
+    # Assign ranks to vector results (they should already be sorted by score)
     for i, doc in enumerate(vector_results, start=1):
         doc["rank"] = i
 
@@ -212,23 +225,46 @@ def hybrid_search(
 
 
 # ---------------------------------------------------------------------------
-# Index builder (in-memory)
+# Index builder for LOCOMO memories
 # ---------------------------------------------------------------------------
 
-def build_bm25_index(documents: List[Dict[str, Any]]) -> BM25Index:
-    """Build a BM25 index from a list of document dicts.
+def build_bm25_index_from_db(conversation_id: Optional[str] = None) -> BM25Index:
+    """Build a BM25 index from unified_memory rows (LOCOMO namespace).
 
-    Each document must have "id" and "content" keys. Additional metadata
-    is preserved and returned on search.
+    This mirrors the scoping logic in _scoped_recall: only rows whose
+    content starts with '[LOCOMO Conv ...' are included.
+
+    Call this once per evaluation run (or once per conversation_id) and
+    reuse the index across questions.
 
     Args:
-        documents: List of dicts with at least {"id": ..., "content": ...}.
+        conversation_id: If set, scope to a single LOCOMO conversation.
 
     Returns:
         Populated BM25Index ready for .search() calls.
     """
+    from .db import get_connection
+
+    conn = get_connection()
+    cur = conn.cursor()
+
+    if conversation_id:
+        cur.execute(
+            "SELECT id, content FROM unified_memory WHERE content LIKE %s",
+            (f"[LOCOMO Conv {conversation_id}%",),
+        )
+    else:
+        cur.execute(
+            "SELECT id, content FROM unified_memory WHERE content LIKE '[LOCOMO Conv%%'"
+        )
+
     index = BM25Index()
-    index.add_documents(documents)
+    batch = []
+    for row in cur.fetchall():
+        batch.append({"id": row[0], "content": row[1]})
+    index.add_documents(batch)
+
+    conn.close()
     return index
 
 
@@ -236,29 +272,63 @@ def build_bm25_index(documents: List[Dict[str, Any]]) -> BM25Index:
 # Per-conversation index cache
 # ---------------------------------------------------------------------------
 
-_index_cache: Dict[str, BM25Index] = {}
+_conv_index_cache: Dict[str, BM25Index] = {}
 
 
-def get_or_build_index(
-    key: str,
-    documents: Optional[List[Dict[str, Any]]] = None
-) -> BM25Index:
-    """Return a cached BM25 index for a key, building from documents if needed.
-
-    Args:
-        key: Cache key (e.g., conversation ID).
-        documents: Documents to index if not cached. Required on first call.
-
-    Returns:
-        BM25Index for the given key.
-    """
-    if key not in _index_cache:
-        if documents is None:
-            raise ValueError(f"No cached index for '{key}' and no documents provided.")
-        _index_cache[key] = build_bm25_index(documents)
-    return _index_cache[key]
+def get_or_build_index(conversation_id: str) -> BM25Index:
+    """Return a cached BM25 index for a conversation, building if needed."""
+    if conversation_id not in _conv_index_cache:
+        _conv_index_cache[conversation_id] = build_bm25_index_from_db(conversation_id)
+    return _conv_index_cache[conversation_id]
 
 
 def clear_index_cache() -> None:
-    """Clear all cached BM25 indices."""
-    _index_cache.clear()
+    """Clear cached BM25 indices (call between benchmark runs)."""
+    _conv_index_cache.clear()
+
+
+# ===========================================================================
+# INTEGRATION EXAMPLE
+# ===========================================================================
+#
+# To integrate into locomo_adapter.py, replace the retrieval step in
+# evaluate_question() with hybrid retrieval. Minimal diff:
+#
+#   from bm25_rrf import hybrid_search, get_or_build_index, clear_index_cache
+#
+#   def evaluate_question(question, use_hybrid=True):
+#       # Step 1a: Vector recall (existing)
+#       t0 = time.time()
+#       vector_results = _scoped_recall(
+#           question.question,
+#           limit=50,                # widen the vector net
+#           conversation_id=question.conversation_id,
+#       )
+#       retrieval_ms = (time.time() - t0) * 1000
+#
+#       # Step 1b: BM25 + RRF fusion (new)
+#       bm25_idx = get_or_build_index(question.conversation_id)
+#       results = hybrid_search(
+#           query=question.question,
+#           vector_results=vector_results,
+#           bm25_index=bm25_idx,
+#           top_k=20,
+#       )
+#
+#       # Step 2: Build context (same as before, but results are now fused)
+#       context_parts = []
+#       for r in results[:15]:
+#           content = r["content"][:800] if r.get("content") else ""
+#           score_label = f"rrf={r['rrf_score']:.4f}"
+#           context_parts.append(f"[{score_label}] {content}")
+#       context = "\n\n".join(context_parts)
+#
+#       # ... rest unchanged ...
+#
+#   # In run_evaluation(), add at the top:
+#       clear_index_cache()
+#
+# The BM25 index for each conversation is built once and cached, so the
+# overhead is only on the first question per conversation (~tens of ms for
+# typical LOCOMO conversation sizes of 100-300 memories).
+# ===========================================================================

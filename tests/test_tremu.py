@@ -1,169 +1,89 @@
-"""
-Tests for TReMu Temporal Reasoning Module
+"""Tests for TReMu temporal reasoning module."""
 
-Verifies temporal_answer and is_temporal without network access.
-The llm_fn is mocked to return deterministic responses.
-"""
-
-import json
-import pytest
-from moss.tremu.temporal_reasoning import temporal_answer, is_temporal
-
-
-# ---------------------------------------------------------------------------
-# is_temporal tests
-# ---------------------------------------------------------------------------
-
-def test_is_temporal_when_did():
-    assert is_temporal("When did they get married?") is True
-
-
-def test_is_temporal_how_long_ago():
-    assert is_temporal("How long ago did the trip happen?") is True
-
-
-def test_is_temporal_what_date():
-    assert is_temporal("What date was the concert?") is True
-
-
-def test_is_temporal_before_after():
-    assert is_temporal("Did the meeting happen before or after the flight?") is True
-
-
-def test_is_temporal_non_temporal():
-    assert is_temporal("What is the capital of France?") is False
-
-
-def test_is_temporal_factual_no_time():
-    assert is_temporal("Tell me about machine learning.") is False
-
-
-def test_is_temporal_most_recent():
-    assert is_temporal("What was the most recent event they talked about?") is True
-
-
-# ---------------------------------------------------------------------------
-# temporal_answer tests
-# ---------------------------------------------------------------------------
-
-SAMPLE_CONTEXT = """[15 Jan 2024] Alice and Bob got married on January 15, 2024.
-[20 Feb 2024] Alice started a new job on February 20, 2024.
-[01 Mar 2024] They moved to a new city on March 1, 2024."""
-
-
-def _make_llm_fn(timeline_json=None, code_str=None):
-    """
-    Mock LLM function.
-
-    First call returns a timeline JSON array.
-    Second call returns Python code.
-    """
-    call_count = [0]
-
-    default_timeline = [
-        {"event": "Alice and Bob married", "date": "2024-01-15", "confidence": "exact", "session": 1},
-        {"event": "Alice started new job", "date": "2024-02-20", "confidence": "exact", "session": 2},
-        {"event": "Moved to new city", "date": "2024-03-01", "confidence": "exact", "session": 3},
-    ]
-    _timeline = timeline_json if timeline_json is not None else default_timeline
-
-    default_code = """
-from datetime import datetime
-timeline_dates = sorted(
-    [t for t in timeline if t.get("date") and t["date"] != "unknown"],
-    key=lambda t: t["date"]
+from moss.tremu import is_temporal, extract_timeline
+from moss.tremu.temporal_reasoning import (
+    _parse_timeline_json,
+    _extract_code,
+    execute_temporal_code,
 )
-answer = timeline_dates[0]["event"] if timeline_dates else "unknown"
+
+
+def test_is_temporal_strong_keywords():
+    assert is_temporal("When did Alice start her new job?")
+    assert is_temporal("How long ago did they move?")
+    assert is_temporal("What date was the meeting?")
+
+
+def test_is_temporal_negative():
+    assert not is_temporal("What is Alice's favorite color?")
+    assert not is_temporal("Tell me about the project")
+
+
+def test_is_temporal_weak_signals():
+    assert is_temporal("Did it happen before or after the move?")
+    assert is_temporal("What was the first event in the sequence?")
+
+
+def test_parse_timeline_json_valid():
+    raw = '[{"event": "started job", "date": "2023-05-15", "confidence": "exact", "session": 1}]'
+    result = _parse_timeline_json(raw)
+    assert len(result) == 1
+    assert result[0]["date"] == "2023-05-15"
+
+
+def test_parse_timeline_json_with_fences():
+    raw = '```json\n[{"event": "test", "date": "2023-01-01", "confidence": "inferred", "session": null}]\n```'
+    result = _parse_timeline_json(raw)
+    assert len(result) == 1
+
+
+def test_parse_timeline_json_empty():
+    assert _parse_timeline_json("") == []
+    assert _parse_timeline_json("no json here") == []
+
+
+def test_extract_code_plain():
+    code = 'answer = "May 2023"'
+    assert _extract_code(code) == code
+
+
+def test_extract_code_fenced():
+    raw = '```python\nanswer = "May 2023"\n```'
+    assert _extract_code(raw) == 'answer = "May 2023"'
+
+
+def test_execute_temporal_code_simple():
+    code = """
+dates = [e["date"] for e in timeline if e["date"] != "unknown"]
+dates.sort()
+answer = dates[0] if dates else "unknown"
 """
-    _code = code_str if code_str is not None else default_code
-
-    def llm_fn(prompt, system=None):
-        call_count[0] += 1
-        if call_count[0] == 1:
-            # First call: return timeline extraction
-            return json.dumps(_timeline)
-        else:
-            # Second call: return computation code
-            return _code
-
-    return llm_fn
+    timeline = [
+        {"event": "A", "date": "2023-05-15", "confidence": "exact", "session": 1},
+        {"event": "B", "date": "2023-03-01", "confidence": "exact", "session": 2},
+    ]
+    result = execute_temporal_code(code, timeline)
+    assert result == "2023-03-01"
 
 
-def test_temporal_answer_basic():
-    """temporal_answer should return a non-empty string answer."""
-    llm_fn = _make_llm_fn()
-    result = temporal_answer(
-        question="When did they get married?",
-        context=SAMPLE_CONTEXT,
-        llm_fn=llm_fn,
-    )
-    assert isinstance(result, str)
-    assert len(result) > 0
+def test_execute_temporal_code_duration():
+    code = """
+from datetime import datetime, timedelta
+d1 = datetime.strptime(timeline[0]["date"], "%Y-%m-%d")
+d2 = datetime.strptime(timeline[1]["date"], "%Y-%m-%d")
+diff = abs((d2 - d1).days)
+answer = f"{diff} days"
+"""
+    timeline = [
+        {"event": "start", "date": "2023-01-10", "confidence": "exact", "session": 1},
+        {"event": "end", "date": "2023-01-20", "confidence": "exact", "session": 2},
+    ]
+    result = execute_temporal_code(code, timeline)
+    assert result == "10 days"
 
 
-def test_temporal_answer_first_event():
-    """For 'what was the first event', should return earliest date event."""
-    llm_fn = _make_llm_fn()
-    result = temporal_answer(
-        question="What was the first event in chronological order?",
-        context=SAMPLE_CONTEXT,
-        llm_fn=llm_fn,
-    )
-    assert isinstance(result, str)
-    # Should identify the marriage as the first event
-    assert "married" in result.lower() or "2024-01-15" in result or len(result) > 0
-
-
-def test_temporal_answer_non_temporal_passthrough():
-    """For non-temporal questions, temporal_answer should return None or empty."""
-    call_count = [0]
-
-    def llm_fn(prompt, system=None):
-        call_count[0] += 1
-        return "[]"  # empty timeline
-
-    result = temporal_answer(
-        question="What is the capital of France?",
-        context="France is a country in Europe.",
-        llm_fn=llm_fn,
-    )
-    # Non-temporal question: should return None or empty string
-    assert result is None or result == "" or isinstance(result, str)
-
-
-def test_temporal_answer_malformed_timeline():
-    """temporal_answer should handle LLM returning malformed JSON gracefully."""
-    call_count = [0]
-
-    def llm_fn(prompt, system=None):
-        call_count[0] += 1
-        if call_count[0] == 1:
-            return "not valid json {{{"  # malformed
-        return "answer = 'unknown'"
-
-    result = temporal_answer(
-        question="When did they meet?",
-        context=SAMPLE_CONTEXT,
-        llm_fn=llm_fn,
-    )
-    # Should not crash, may return None or fallback string
-    assert result is None or isinstance(result, str)
-
-
-def test_temporal_answer_empty_context():
-    """temporal_answer with empty context should not crash."""
-    llm_fn = _make_llm_fn(timeline_json=[])
-    result = temporal_answer(
-        question="When did the event happen?",
-        context="",
-        llm_fn=llm_fn,
-    )
-    assert result is None or isinstance(result, str)
-
-
-def test_is_temporal_duration_question():
-    assert is_temporal("How many days between the wedding and the move?") is True
-
-
-def test_is_temporal_timeline_question():
-    assert is_temporal("What is the timeline of events?") is True
+def test_execute_temporal_code_sandbox_blocks_imports():
+    code = 'import os\nanswer = os.getcwd()'
+    timeline = []
+    result = execute_temporal_code(code, timeline)
+    assert result is None  # Should fail due to import stripping
