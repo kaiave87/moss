@@ -1,0 +1,43 @@
+{
+  "benchmark": "LoCoMo",
+  "version": "V61 (Ring 016)",
+  "system": "Aletheia Synaptic Model Mesh (qwen3.5:35b-a3b + phi4:14b SH routing + Claude Sonnet CS routing)",
+  "judge": "GPT-4o",
+  "total_conversations": 10,
+  "total_questions": 1986,
+  "overall_accuracy": 0.785,
+  "by_category": {
+    "adversarial": {"accuracy": 0.946, "total": 446},
+    "common-sense": {"accuracy": 0.667, "total": 96},
+    "multi-hop": {"accuracy": 0.784, "total": 841},
+    "single-hop": {"accuracy": 0.535, "total": 282},
+    "temporal": {"accuracy": 0.816, "total": 321}
+  },
+  "per_conversation": {
+    "conv0": {"accuracy": 0.751, "questions": 199},
+    "conv1": {"accuracy": 0.824, "questions": 105},
+    "conv2": {"accuracy": 0.858, "questions": 193},
+    "conv3": {"accuracy": 0.723, "questions": 260},
+    "conv4": {"accuracy": 0.783, "questions": 242},
+    "conv5": {"accuracy": 0.778, "questions": 158},
+    "conv6": {"accuracy": 0.779, "questions": 190},
+    "conv7": {"accuracy": 0.824, "questions": 239},
+    "conv8": {"accuracy": 0.735, "questions": 196},
+    "conv9": {"accuracy": 0.819, "questions": 204}
+  },
+  "configuration": {
+    "retrieval": "9-channel RRF (vector, BM25, temporal, entity, entity-scoped, sub-query, graph, Hebbian, HyDE)",
+    "reranking": "Cross-encoder (mxbai-rerank-base-v1)",
+    "hebbian": "OFF (undirected Hebbian reduces accuracy by 2.5pp)",
+    "hardware": "3x consumer GPU (RTX 5090 + 2x RTX 3090) + M5 Pro MacBook",
+    "inference": "All-local (except CS routing to Claude Sonnet and GPT-4o judging)"
+  },
+  "key_findings": [
+    "Undirected Hebbian pathway strengthening reduces accuracy by 2.5pp (77.6% → 80.1% without)",
+    "Category-specific model routing (+0.9pp) outperforms uniform pipeline changes",
+    "Per-category treatment is mandatory — global changes regress at least one category",
+    "76% of single-hop failures are retrieval misses from indirect semantic phrasing",
+    "90% of multi-hop failures are reasoning errors, not retrieval failures"
+  ],
+  "date": "2026-04-10"
+}
